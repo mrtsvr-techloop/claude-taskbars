@@ -5,6 +5,12 @@ type Bag = Record<string, unknown>
 export type Tone = 'success' | 'warning' | 'error'
 
 const TODO_PREFIX = 'todo-'
+const PLAN_PREFIX = 'plan-'
+const CALL_PREFIX = 'call-'
+const AGENT_PREFIX = 'agent-'
+/** Rows the task list does not hold: todos, declared tasks, subagents, samples. */
+const OWN_PREFIXES = [TODO_PREFIX, PLAN_PREFIX, CALL_PREFIX, AGENT_PREFIX, 'demo-']
+const isOwn = (row: TaskRow): boolean => OWN_PREFIXES.some(prefix => row.id.startsWith(prefix))
 /** A started task whose progress the model never reported sits at the middle. */
 const UNREPORTED_PERCENT = 50
 
@@ -98,7 +104,7 @@ export const listed = (list: TaskRow[], result: unknown): TaskRow[] => {
     ]
   })
 
-  return [...rows, ...list.filter(row => row.id.startsWith(TODO_PREFIX))]
+  return [...rows, ...list.filter(isOwn)]
 }
 
 /** TodoWrite's input is the whole todo list: it replaces every todo row. */
@@ -126,6 +132,75 @@ export const todos = (list: TaskRow[], input: Bag): TaskRow[] => {
   return [...list.filter(row => !row.id.startsWith(TODO_PREFIX)), ...rows]
 }
 
+/**
+ * The whole list the model declared through the mod's own tool: it replaces
+ * every declared row. Undefined when the input is no list of named tasks.
+ */
+export const declared = (list: TaskRow[], input: Bag): TaskRow[] | undefined => {
+  if (!Array.isArray(input.tasks)) {
+    return undefined
+  }
+
+  const rows: TaskRow[] = []
+
+  for (const [index, task] of input.tasks.entries()) {
+    const name = isBag(task) ? asText(task.name) : undefined
+    const status = isBag(task) ? (task.status === 'blocked' ? 'blocked' : asStatus(task.status)) : undefined
+
+    if (!isBag(task) || name === undefined || status === undefined) {
+      return undefined
+    }
+
+    rows.push({
+      id: `${PLAN_PREFIX}${index}`,
+      name,
+      status,
+      blockedBy: [],
+      progress: asProgress({ progress: task.progress }) ?? null,
+    })
+  }
+
+  return [...list.filter(row => !row.id.startsWith(PLAN_PREFIX)), ...rows]
+}
+
+/** A subagent the model launched is a running row, named as the call describes it. */
+export const agentCalled = (list: TaskRow[], callId: string, input: Bag): TaskRow[] => [
+  ...list,
+  {
+    id: `${CALL_PREFIX}${callId}`,
+    name: asText(input.description) ?? asText(input.subagent_type) ?? 'subagent',
+    status: 'in_progress',
+    blockedBy: [],
+    progress: null,
+  },
+]
+
+/**
+ * The launch's answer settles the row: done when the subagent ran to its end,
+ * stopped when the call failed, still running under the agent's id when it
+ * went to the background.
+ */
+export const agentAnswered = (list: TaskRow[], callId: string, result: unknown, isFailed: boolean): TaskRow[] =>
+  list.map((row): TaskRow => {
+    if (row.id !== `${CALL_PREFIX}${callId}`) {
+      return row
+    }
+
+    if (isFailed || !isBag(result)) {
+      return { ...row, status: 'stopped' }
+    }
+
+    const agentId = asText(result.agentId)
+
+    return result.status === 'completed' || agentId === undefined
+      ? { ...row, status: 'completed' }
+      : { ...row, id: `${AGENT_PREFIX}${agentId}` }
+  })
+
+/** A background subagent that stopped is done. */
+export const agentStopped = (list: TaskRow[], agentId: string): TaskRow[] =>
+  list.map(row => (row.id === `${AGENT_PREFIX}${agentId}` ? { ...row, status: 'completed' } : row))
+
 /** An interrupted turn leaves what was running stopped. */
 export const interrupted = (list: TaskRow[]): TaskRow[] =>
   list.map(row => (row.status === 'in_progress' ? { ...row, status: 'stopped' } : row))
@@ -134,15 +209,16 @@ export const isAllDone = (list: TaskRow[]): boolean =>
   list.length > 0 && list.every(row => row.status === 'completed')
 
 export const isBlocked = (row: TaskRow, list: TaskRow[]): boolean =>
-  row.status !== 'completed' &&
-  row.blockedBy.some(id => list.some(one => one.id === id && one.status !== 'completed'))
+  row.status === 'blocked' ||
+  (row.status !== 'completed' &&
+    row.blockedBy.some(id => list.some(one => one.id === id && one.status !== 'completed')))
 
 export const percentOf = (row: TaskRow): number => {
   if (row.status === 'completed') {
     return 100
   }
 
-  if (row.status === 'pending') {
+  if (row.status === 'pending' || row.status === 'blocked') {
     return row.progress ?? 0
   }
 

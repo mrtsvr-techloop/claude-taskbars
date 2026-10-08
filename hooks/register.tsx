@@ -3,8 +3,12 @@ import type { Register } from 'claude-code'
 
 import { hasDemo, withDemo, withoutDemo } from './demo'
 import {
+  agentAnswered,
+  agentCalled,
+  agentStopped,
   cellOf,
   created,
+  declared,
   fitting,
   interrupted,
   isAllDone,
@@ -25,11 +29,41 @@ const GAP_COLUMNS = 2
 const PROGRESS_SECTION = {
   id: 'task-bars:progress',
   text:
-    'The person watches a progress bar for each task of the task list. While a task is in_progress, ' +
-    'report how far it is by calling TaskUpdate with metadata: { "progress": <0-100> } at each real ' +
-    'milestone of the work, not after every tool call. A task you mark completed needs no progress.',
+    'The person watches one progress bar per task above the prompt. Keep the bars current without ' +
+    'being asked and without announcing it: for any work of two or more steps, call ' +
+    'mcp__task-bars__set_tasks with the whole list as you start, and again whenever a step starts, ' +
+    'reaches a real milestone, ends or gets blocked, giving each in_progress task its progress ' +
+    '(0-100). Where you keep a task list with TaskCreate and TaskUpdate, that list is shown already: ' +
+    'report progress there with TaskUpdate metadata: { "progress": <0-100> } and leave set_tasks out.',
   scope: 'session',
 } as const
+
+const TASK_STATUSES = ['pending', 'in_progress', 'completed', 'blocked']
+
+const SET_TASKS = {
+  name: 'set_tasks',
+  description:
+    'Shows the person the tasks of the current work as progress bars above the prompt. Takes the ' +
+    'whole list every time: it replaces the one shown before; an empty list clears it.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'A short title for the task' },
+            status: { type: 'string', enum: TASK_STATUSES },
+            progress: { type: 'number', minimum: 0, maximum: 100, description: 'How far an in_progress task is' },
+          },
+          required: ['name', 'status'],
+        },
+      },
+    },
+    required: ['tasks'],
+  },
+}
 
 const tasks = atom({ plugin: 'task-bars', key: 'tasks' } as const, [])
 const isHidden = atom({ plugin: 'task-bars', key: 'isHidden' } as const, false)
@@ -45,6 +79,36 @@ export const register: Register = on => {
       name: DEMO_COMMAND,
       description: 'Add or remove sample tasks at different percentages in the task bars',
     })
+
+    await $.tool.register(SET_TASKS)
+
+    return next(e)
+  })
+
+  on('tool.call', { tool: 'mcp__task-bars__set_tasks' }, async ($, e) => {
+    const input = { ...e }
+
+    if (declared([], input) === undefined) {
+      return { deny: `tasks must be a list of { name, status, progress? }, status one of ${TASK_STATUSES.join(', ')}.` }
+    }
+
+    await update($, tasks, list => declared(list, input) ?? list)
+
+    return { result: 'The task bars are up to date.' }
+  })
+
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    await update($, tasks, list => agentCalled(list, e.tool_use_id, { ...e }))
+    const ran = await next(e)
+    await update($, tasks, list =>
+      agentAnswered(list, e.tool_use_id, ran.result, ran.deny !== undefined || ran.isError === true),
+    )
+
+    return ran
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    await update($, tasks, list => agentStopped(list, e.agent_id))
 
     return next(e)
   })
@@ -70,9 +134,7 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
 
-    return e.tools.includes('TaskUpdate')
-      ? { sections: [...composed.sections, PROGRESS_SECTION] }
-      : composed
+    return { sections: [...composed.sections, PROGRESS_SECTION] }
   })
 
   on('prompt.submit', async ($, e, next) => {

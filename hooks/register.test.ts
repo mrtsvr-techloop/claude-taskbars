@@ -90,6 +90,44 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+test('the tasks the model declares through the mod own tool are drawn, and a bad list is refused', async $ => {
+  const answer = await $.tool.call({
+    tool: 'mcp__task-bars__set_tasks',
+    tasks: [
+      { name: 'Plan', status: 'completed' },
+      { name: 'Code', status: 'in_progress', progress: 30 },
+      { name: 'Ship', status: 'blocked' },
+    ],
+  })
+  expect(answer.deny).toBe(undefined)
+
+  const lines = await drawn($, 'terminal')
+  const text = lines.flat().map(piece => piece.text).join('')
+  expect(text).toContain(' fine 100% ')
+  expect(text).toContain(' in corso 30% ')
+  expect(text).toContain(' blocked 0% ')
+  expect(lines.flat().filter(piece => piece.text.includes('blocked'))[0]?.color).toBe('error')
+
+  const refused = await $.tool.call({ tool: 'mcp__task-bars__set_tasks', tasks: [{ name: 'No status' } as never] })
+  expect(typeof refused.deny).toBe('string')
+})
+
+test('a subagent is a running bar from its launch, done when it stops', async ($, on) => {
+  on('tool.call', { tool: 'Agent' }, () => ({
+    result: { status: 'async_launched', agentId: 'a1', description: 'Review the diff', prompt: 'p', outputFile: 'o' },
+  }))
+  on('classic.SubagentStop', () => ({}))
+
+  await $.tool.call({ tool: 'Agent', description: 'Review the diff', prompt: 'p' })
+  const running = (await drawn($, 'terminal')).flat().map(piece => piece.text).join('')
+  expect(running).toContain(' Review the diff ')
+  expect(running).toContain(' in corso 50% ')
+
+  await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'a1', agent_transcript_path: 't', agent_type: 'reviewer' })
+  const done = (await drawn($, 'terminal')).flat().map(piece => piece.text).join('')
+  expect(done).toContain(' fine 100% ')
+})
+
 test('a todo list is drawn one bar per todo', async ($, on) => {
   on('tool.call', { tool: 'TodoWrite' }, () => ({ result: { oldTodos: [], newTodos: [] } }))
 

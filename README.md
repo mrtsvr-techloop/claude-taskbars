@@ -32,12 +32,19 @@ To run it from a clone instead: `claude --plugin-dir <path to the clone>`.
 
 ## What it tracks
 
-The task list (`TaskCreate`, `TaskUpdate`, `TaskList`) and the todos of `TodoWrite`. Background
-shells, subagents and monitors are not tracked.
+The bars appear by themselves; nobody asks for them. Four sources feed them:
 
-Claude Code exposes no progress for a task, so the mod adds a section to the system prompt asking
-the model to report it with `TaskUpdate` and `metadata: { "progress": <0-100> }`. Until the model
-does, a started task sits at 50%; a todo is always at 0, 50 or 100.
+- the mod's own tool, `mcp__task-bars__set_tasks`, which the model calls with the whole list of
+  tasks of its current work; it is what feeds the bars where the session offers no task list;
+- the task list (`TaskCreate`, `TaskUpdate`, `TaskList`);
+- the todos of `TodoWrite`;
+- the subagents the model launches with `Agent`: running from the launch, done when they stop.
+
+Background shells and monitors are not tracked.
+
+The mod adds a section to the system prompt asking the model to keep the bars current and to give
+each running task its progress (0-100). A running task with no reported progress sits at 50%: a
+subagent always does, and a todo is always at 0, 50 or 100.
 
 While it draws, the mod takes the band above the prompt in place of other mods drawing there.
 
