@@ -34,6 +34,23 @@ const asProgress = (metadata: unknown): number | undefined => {
     : undefined
 }
 
+/**
+ * One source's rows replaced by its new whole list. A pinned row is locked:
+ * it keeps its pin when the list names it again, and stays when it does not.
+ */
+const replaced = (list: TaskRow[], isSource: (row: TaskRow) => boolean, rows: TaskRow[]): TaskRow[] => {
+  const fresh = new Map(rows.map(row => [row.id, row]))
+  const merged = [...fresh.values()].map(row =>
+    list.some(one => one.id === row.id && one.isPinned === true) ? { ...row, isPinned: true } : row,
+  )
+
+  return [...list.filter(row => !isSource(row) || (row.isPinned === true && !fresh.has(row.id))), ...merged]
+}
+
+/** The person's click on a task's pin: pinned becomes loose, loose pinned. */
+export const toggled = (list: TaskRow[], id: string): TaskRow[] =>
+  list.map(row => (row.id === id ? { ...row, isPinned: row.isPinned !== true } : row))
+
 /** TaskCreate's result adds one awaiting row. */
 export const created = (list: TaskRow[], result: unknown): TaskRow[] => {
   const task = isBag(result) ? result.task : undefined
@@ -58,7 +75,7 @@ export const updated = (list: TaskRow[], input: Bag, result: unknown): TaskRow[]
   }
 
   if (input.status === 'deleted') {
-    return list.filter(row => row.id !== id)
+    return list.filter(row => row.id !== id || row.isPinned === true)
   }
 
   const known = list.find(row => row.id === id)
@@ -74,7 +91,7 @@ export const updated = (list: TaskRow[], input: Bag, result: unknown): TaskRow[]
   return known ? list.map(one => (one.id === id ? next : one)) : [...list, next]
 }
 
-/** TaskList's result is the whole task list: it replaces every row but the todos. */
+/** TaskList's result is the whole task list: it replaces every row of that list. */
 export const listed = (list: TaskRow[], result: unknown): TaskRow[] => {
   const tasks = isBag(result) && Array.isArray(result.tasks) ? result.tasks : undefined
 
@@ -104,7 +121,7 @@ export const listed = (list: TaskRow[], result: unknown): TaskRow[] => {
     ]
   })
 
-  return [...rows, ...list.filter(isOwn)]
+  return replaced(list, row => !isOwn(row), rows)
 }
 
 /** TodoWrite's input is the whole todo list: it replaces every todo row. */
@@ -113,13 +130,13 @@ export const todos = (list: TaskRow[], input: Bag): TaskRow[] => {
     return list
   }
 
-  const rows = input.todos.flatMap((todo, index): TaskRow[] => {
+  const rows = input.todos.flatMap((todo): TaskRow[] => {
     const name = isBag(todo) ? asText(todo.content) : undefined
 
     return isBag(todo) && name !== undefined
       ? [
           {
-            id: `${TODO_PREFIX}${index}`,
+            id: `${TODO_PREFIX}${name}`,
             name,
             status: asStatus(todo.status) ?? 'pending',
             blockedBy: [],
@@ -129,12 +146,13 @@ export const todos = (list: TaskRow[], input: Bag): TaskRow[] => {
       : []
   })
 
-  return [...list.filter(row => !row.id.startsWith(TODO_PREFIX)), ...rows]
+  return replaced(list, row => row.id.startsWith(TODO_PREFIX), rows)
 }
 
 /**
  * The whole list the model declared through the mod's own tool: it replaces
- * every declared row. Undefined when the input is no list of named tasks.
+ * every declared row, a task it marks persistent pinned. Undefined when the
+ * input is no list of named tasks.
  */
 export const declared = (list: TaskRow[], input: Bag): TaskRow[] | undefined => {
   if (!Array.isArray(input.tasks)) {
@@ -143,7 +161,7 @@ export const declared = (list: TaskRow[], input: Bag): TaskRow[] | undefined => 
 
   const rows: TaskRow[] = []
 
-  for (const [index, task] of input.tasks.entries()) {
+  for (const task of input.tasks) {
     const name = isBag(task) ? asText(task.name) : undefined
     const status = isBag(task) ? (task.status === 'blocked' ? 'blocked' : asStatus(task.status)) : undefined
 
@@ -152,15 +170,16 @@ export const declared = (list: TaskRow[], input: Bag): TaskRow[] | undefined => 
     }
 
     rows.push({
-      id: `${PLAN_PREFIX}${index}`,
+      id: `${PLAN_PREFIX}${name}`,
       name,
       status,
       blockedBy: [],
       progress: asProgress({ progress: task.progress }) ?? null,
+      ...(task.persistent === true ? { isPinned: true } : {}),
     })
   }
 
-  return [...list.filter(row => !row.id.startsWith(PLAN_PREFIX)), ...rows]
+  return replaced(list, row => row.id.startsWith(PLAN_PREFIX), rows)
 }
 
 /** A subagent the model launched is a running row, named as the call describes it. */
@@ -205,8 +224,14 @@ export const agentStopped = (list: TaskRow[], agentId: string): TaskRow[] =>
 export const interrupted = (list: TaskRow[]): TaskRow[] =>
   list.map(row => (row.status === 'in_progress' ? { ...row, status: 'stopped' } : row))
 
-export const isAllDone = (list: TaskRow[]): boolean =>
-  list.length > 0 && list.every(row => row.status === 'completed')
+/** Once every loose task is done they all go; the pinned ones stay. */
+export const cleared = (list: TaskRow[]): TaskRow[] => {
+  const loose = list.filter(row => row.isPinned !== true)
+
+  return loose.length > 0 && loose.every(row => row.status === 'completed')
+    ? list.filter(row => row.isPinned === true)
+    : list
+}
 
 export const isBlocked = (row: TaskRow, list: TaskRow[]): boolean =>
   row.status === 'blocked' ||
@@ -268,13 +293,13 @@ export const cellOf = (row: TaskRow, list: TaskRow[], width: number): { filled: 
   return { filled: text.slice(0, cells), rest: text.slice(cells) }
 }
 
-/** The rows that fit: when there are too many, finished ones give way first. */
+/** The rows that fit: when there are too many, finished loose ones give way first. */
 export const fitting = (list: TaskRow[], room: number): TaskRow[] => {
   if (list.length <= room) {
     return list
   }
 
-  const open = list.filter(row => row.status !== 'completed')
+  const open = list.filter(row => row.status !== 'completed' || row.isPinned === true)
   const kept = new Set(
     (open.length >= room ? open.slice(0, room) : [...open, ...list.filter(row => !open.includes(row))].slice(0, room)).map(
       row => row.id,

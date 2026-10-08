@@ -25,6 +25,20 @@ Answer `y` to add the marketplace, then pick a scope.
 
 To run it from a clone instead: `claude --plugin-dir <path to the clone>`.
 
+## Pinning
+
+Each bar starts with a pin: `○` loose, `📌` pinned. Click it to pin or unpin the task. The pin is
+the one spot of a bar a click reaches.
+
+A pinned task is locked: it stays when the model sends a list without it, when the task list
+deletes it, and when the finished tasks are cleared. The model still updates its state and
+progress. Only the person's click unpins it.
+
+The model pins a task too, by declaring it with `persistent: true` in `set_tasks`.
+
+Tasks that are not pinned are cleared at the next prompt once all of them are done. Pins last for
+the session.
+
 ## Commands
 
 - `/task-bars` hides or shows the bars.

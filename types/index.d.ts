@@ -6,6 +6,8 @@ export type TaskRow = {
   status: TaskStatus
   /** Ids of the tasks this one waits for. */
   blockedBy: string[]
+  /** Pinned by the person's click or by the model: no clean-up removes it. */
+  isPinned?: boolean
   /** 0-100 as the model reported it in `metadata.progress`; null when it never did. */
   progress: number | null
 }
@@ -15,6 +17,8 @@ export type DeclaredTask = {
   name: string
   status: 'pending' | 'in_progress' | 'completed' | 'blocked'
   progress?: number
+  /** Pins the task: it stays until the person unpins it. */
+  persistent?: boolean
 }
 
 declare module 'claude-code' {

@@ -7,13 +7,14 @@ import {
   agentCalled,
   agentStopped,
   cellOf,
+  cleared,
   created,
   declared,
   fitting,
   interrupted,
-  isAllDone,
   listed,
   todos,
+  toggled,
   toneOf,
   updated,
 } from './model'
@@ -25,6 +26,10 @@ const MAX_ROWS = 10
 const MIN_CELL_COLUMNS = 30
 const MAX_CELL_COLUMNS = 60
 const GAP_COLUMNS = 2
+/** The pin at the head of each bar, the one spot of it a click reaches. */
+const PIN_COLUMNS = 3
+const PINNED = '📌'
+const LOOSE = '○'
 
 const PROGRESS_SECTION = {
   id: 'task-bars:progress',
@@ -44,7 +49,8 @@ const SET_TASKS = {
   name: 'set_tasks',
   description:
     'Shows the person the tasks of the current work as progress bars above the prompt. Takes the ' +
-    'whole list every time: it replaces the one shown before; an empty list clears it.',
+    'whole list every time: it replaces the one shown before; an empty list clears it. A task ' +
+    'marked persistent is pinned: it stays, even left out of a later list, until the person unpins it.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -56,6 +62,7 @@ const SET_TASKS = {
             name: { type: 'string', description: 'A short title for the task' },
             status: { type: 'string', enum: TASK_STATUSES },
             progress: { type: 'number', minimum: 0, maximum: 100, description: 'How far an in_progress task is' },
+            persistent: { type: 'boolean', description: 'Pins the task so no clean-up removes it' },
           },
           required: ['name', 'status'],
         },
@@ -138,9 +145,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (isAllDone(await read($, tasks))) {
-      await update($, tasks, () => [])
-    }
+    await update($, tasks, cleared)
 
     return next(e)
   })
@@ -191,12 +196,15 @@ export const register: Register = on => {
       return next(e)
     }
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const { bodyColumns } = e.props
     const columns = bodyColumns >= MIN_CELL_COLUMNS * 2 + GAP_COLUMNS ? 2 : 1
     const cellColumns = Math.max(
       1,
-      Math.min(MAX_CELL_COLUMNS, Math.floor((bodyColumns - GAP_COLUMNS * (columns - 1)) / columns)),
+      Math.min(
+        MAX_CELL_COLUMNS,
+        Math.floor((bodyColumns - GAP_COLUMNS * (columns - 1)) / columns) - PIN_COLUMNS,
+      ),
     )
     const room = Math.max(1, Math.min(MAX_ROWS, e.props.maxRows - 1)) * columns
     const rows = fitting(list, room)
@@ -217,6 +225,15 @@ export const register: Register = on => {
 
               return [
                 <Box marginRight={GAP_COLUMNS}>
+                  <Box width={PIN_COLUMNS}>
+                    <Button
+                      key={`pin-${row.id}`}
+                      plain
+                      dimColor={row.isPinned !== true}
+                      label={row.isPinned === true ? PINNED : LOOSE}
+                      onPress={() => update($, tasks, rows => toggled(rows, row.id))}
+                    />
+                  </Box>
                   {cell.filled.length > 0 && (
                     <Text backgroundColor={tone} color="inverseText">
                       {cell.filled}

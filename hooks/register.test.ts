@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { TaskRow } from '../types'
 import { cellOf, fitting, interrupted, labelOf, percentOf, toneOf } from './model'
 
-/** 100 columns: two columns of bars, each 49 wide. */
+/** 100 columns: two columns of bars, each 46 wide beside its pin. */
 const BAND = {
   plugin: 'task-bars',
   component: 'AbovePrompt',
@@ -24,6 +24,8 @@ const DEMO_RUN = {
   origin: { kind: 'composer' },
   presentation: { isFullscreen: false, columns: 120 },
 } as const
+
+const PROMPT = { text: 'next', wait: false, origin: { kind: 'composer' } } as const
 
 const row = (id: string, over: Partial<TaskRow> = {}): TaskRow => ({
   id,
@@ -71,21 +73,21 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.tool.call({ tool: 'TaskCreate', subject: 'Build', description: 'Build it' })
     const waiting = (await drawn($, surface))[0] ?? []
     expect(waiting.map(piece => [piece.fill, piece.color])).toEqual([[undefined, 'warning']])
-    expect(waiting[0]?.text).toHaveLength(49)
+    expect(waiting[0]?.text).toHaveLength(46)
     expect(waiting[0]?.text.startsWith(' Build ')).toBe(true)
     expect(waiting[0]?.text.endsWith(' awaiting 0% ')).toBe(true)
 
     await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress', metadata: { progress: 40 } })
     const running = (await drawn($, surface))[0] ?? []
     expect(running.map(piece => [piece.fill, piece.color, piece.text.length])).toEqual([
-      ['success', 'inverseText', 20],
-      [undefined, 'success', 29],
+      ['success', 'inverseText', 18],
+      [undefined, 'success', 28],
     ])
     expect(running.map(piece => piece.text).join('').endsWith(' in corso 40% ')).toBe(true)
 
     await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
     const done = (await drawn($, surface))[0] ?? []
-    expect(done.map(piece => [piece.fill, piece.color, piece.text.length])).toEqual([['success', 'inverseText', 49]])
+    expect(done.map(piece => [piece.fill, piece.color, piece.text.length])).toEqual([['success', 'inverseText', 46]])
     expect(done[0]?.text.endsWith(' fine 100% ')).toBe(true)
   })
 }
@@ -110,6 +112,54 @@ test('the tasks the model declares through the mod own tool are drawn, and a bad
 
   const refused = await $.tool.call({ tool: 'mcp__task-bars__set_tasks', tasks: [{ name: 'No status' } as never] })
   expect(typeof refused.deny).toBe('string')
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: a click on a task's pin locks it, and no clean-up removes it until unpinned`, async ($, on) => {
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    const declare = (tasks: { name: string; status: 'completed'; persistent?: boolean }[]) =>
+      $.tool.call({ tool: 'mcp__task-bars__set_tasks', tasks })
+
+    await declare([{ name: 'Keep', status: 'completed' }, { name: 'Drop', status: 'completed' }])
+    const ui = await $.ui.mount({ ...BAND, surface })
+    const pins = async () => (await ui.findAll({ type: 'Button' })).map(one => [one.key, one.props.label])
+    expect(await pins()).toEqual([
+      ['pin-plan-Keep', '○'],
+      ['pin-plan-Drop', '○'],
+    ])
+
+    await ui.press({ key: 'pin-plan-Keep' })
+    expect(await pins()).toEqual([
+      ['pin-plan-Keep', '📌'],
+      ['pin-plan-Drop', '○'],
+    ])
+
+    // The model's empty list, then the prompt after every loose task is done.
+    await declare([])
+    expect(await pins()).toEqual([['pin-plan-Keep', '📌']])
+    await declare([{ name: 'Drop', status: 'completed' }])
+    await $.prompt.submit(PROMPT)
+    expect(await pins()).toEqual([['pin-plan-Keep', '📌']])
+
+    await ui.press({ key: 'pin-plan-Keep' })
+    expect(await pins()).toEqual([['pin-plan-Keep', '○']])
+    await ui.unmount()
+  })
+}
+
+test('the model pins a task by declaring it persistent, and cannot unpin it', async $ => {
+  await $.tool.call({
+    tool: 'mcp__task-bars__set_tasks',
+    tasks: [{ name: 'Release', status: 'in_progress', progress: 20, persistent: true }],
+  })
+  await $.tool.call({
+    tool: 'mcp__task-bars__set_tasks',
+    tasks: [{ name: 'Release', status: 'in_progress', progress: 60, persistent: false }],
+  })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.findAll({ type: 'Button' })).map(one => one.props.label)).toEqual(['📌'])
+  expect((await drawn($, 'terminal')).flat().map(piece => piece.text).join('')).toContain(' in corso 60% ')
 })
 
 test('a subagent is a running bar from its launch, done when it stops', async ($, on) => {
