@@ -1,0 +1,152 @@
+import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+
+import type { TaskRow } from '../types'
+import { cellOf, fitting, interrupted, labelOf, percentOf, toneOf } from './model'
+
+/** 100 columns: two columns of bars, each 49 wide. */
+const BAND = {
+  plugin: 'task-bars',
+  component: 'AbovePrompt',
+  props: {
+    hasSurvey: false,
+    isWorking: true,
+    maxRows: 20,
+    bodyColumns: 100,
+    scroll: { offset: 0, bodyRows: 19 },
+    view: {},
+  },
+} as const
+
+const DEMO_RUN = {
+  command: 'task-bars-demo',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: false, columns: 120 },
+} as const
+
+const row = (id: string, over: Partial<TaskRow> = {}): TaskRow => ({
+  id,
+  name: `task ${id}`,
+  status: 'pending',
+  blockedBy: [],
+  progress: null,
+  ...over,
+})
+
+type Piece = { text: string; fill: unknown; color: unknown }
+
+/** The band's lines as drawn: each a list of pieces, a bar's fill then its rest. */
+const drawn = async ($: Engine, surface: 'terminal' | 'desktop', bodyColumns = 100): Promise<Piece[][]> => {
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns }, surface })
+  const tree = await ui.drawn()
+  await ui.unmount()
+
+  const pieces = (node: unknown): Piece[] => {
+    const one = node as { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+
+    if (one.type === 'Text') {
+      return [
+        {
+          text: (one.children ?? []).join(''),
+          fill: one.props?.backgroundColor,
+          color: one.props?.color,
+        },
+      ]
+    }
+
+    return (one.children ?? []).flatMap(pieces)
+  }
+
+  return ((tree as { children?: unknown[] }).children ?? []).map(pieces)
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: a task is a bar holding its name and percentage, filling as it advances`, async ($, on) => {
+    on('tool.call', { tool: 'TaskCreate' }, () => ({ result: { task: { id: '1', subject: 'Build' } } }))
+    on('tool.call', { tool: 'TaskUpdate' }, () => ({
+      result: { success: true, taskId: '1', updatedFields: ['status'] },
+    }))
+
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Build', description: 'Build it' })
+    const waiting = (await drawn($, surface))[0] ?? []
+    expect(waiting.map(piece => [piece.fill, piece.color])).toEqual([[undefined, 'warning']])
+    expect(waiting[0]?.text).toHaveLength(49)
+    expect(waiting[0]?.text.startsWith(' Build ')).toBe(true)
+    expect(waiting[0]?.text.endsWith(' awaiting 0% ')).toBe(true)
+
+    await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress', metadata: { progress: 40 } })
+    const running = (await drawn($, surface))[0] ?? []
+    expect(running.map(piece => [piece.fill, piece.color, piece.text.length])).toEqual([
+      ['success', 'inverseText', 20],
+      [undefined, 'success', 29],
+    ])
+    expect(running.map(piece => piece.text).join('').endsWith(' in corso 40% ')).toBe(true)
+
+    await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' })
+    const done = (await drawn($, surface))[0] ?? []
+    expect(done.map(piece => [piece.fill, piece.color, piece.text.length])).toEqual([['success', 'inverseText', 49]])
+    expect(done[0]?.text.endsWith(' fine 100% ')).toBe(true)
+  })
+}
+
+test('a todo list is drawn one bar per todo', async ($, on) => {
+  on('tool.call', { tool: 'TodoWrite' }, () => ({ result: { oldTodos: [], newTodos: [] } }))
+
+  await $.tool.call({
+    tool: 'TodoWrite',
+    todos: [
+      { content: 'Read', status: 'completed', activeForm: 'Reading' },
+      { content: 'Write', status: 'in_progress', activeForm: 'Writing' },
+    ],
+  })
+
+  const [line] = await drawn($, 'terminal')
+  const text = (line ?? []).map(piece => piece.text).join('')
+
+  expect(text).toContain(' Read ')
+  expect(text).toContain(' fine 100% ')
+  expect(text).toContain(' Write ')
+  expect(text).toContain(' in corso 50% ')
+})
+
+test('the demo tasks fill two columns down, and one column where the band is narrow', async $ => {
+  const percents = (lines: Piece[][]) =>
+    lines.map(line => (line.map(piece => piece.text).join('').match(/\d+%/g) ?? []).join(' '))
+
+  await $.command.run(DEMO_RUN)
+  expect(percents(await drawn($, 'terminal'))).toEqual(['100% 0%', '82% 0%', '47% 63%', '15%'])
+  expect(percents(await drawn($, 'terminal', 50))).toEqual(['100%', '82%', '47%', '15%', '0%', '0%', '63%'])
+
+  // With no row left the band is handed on, and nothing beneath the mod draws it.
+  await $.command.run(DEMO_RUN)
+  await expect(drawn($, 'terminal')).rejects.toThrow('no implementation for ui.render')
+})
+
+test('the bar is green running or done, orange awaiting, red blocked or stopped', () => {
+  const blocker = row('1', { status: 'in_progress', progress: 30 })
+  const blocked = row('2', { blockedBy: ['1'] })
+  const waiting = row('3')
+  const done = row('4', { status: 'completed' })
+  const [stopped] = interrupted([blocker])
+  const list = [blocker, blocked, waiting, done]
+
+  expect([toneOf(blocker, list), labelOf(blocker, list), percentOf(blocker)]).toEqual(['success', 'in corso', 30])
+  expect([toneOf(blocked, list), labelOf(blocked, list), percentOf(blocked)]).toEqual(['error', 'blocked', 0])
+  expect([toneOf(waiting, list), labelOf(waiting, list), percentOf(waiting)]).toEqual(['warning', 'awaiting', 0])
+  expect([toneOf(done, list), labelOf(done, list), percentOf(done)]).toEqual(['success', 'fine', 100])
+  expect(stopped && [toneOf(stopped, list), labelOf(stopped, list)]).toEqual(['error', 'stopped'])
+})
+
+test('a bar keeps its width, cuts a long name and drops the label where it is narrow', () => {
+  const task = row('1', { name: 'A very long task name indeed', status: 'in_progress', progress: 50 })
+
+  expect(cellOf(task, [task], 20)).toEqual({ filled: ' A very lo', rest: 'ng t… 50% ' })
+
+  const wide = cellOf(task, [task], 40)
+  expect([wide.filled.length, wide.rest.length]).toEqual([20, 20])
+  expect(`${wide.filled}${wide.rest}`).toBe(' A very long task name in… in corso 50% ')
+
+  const list = [row('1', { status: 'completed' }), row('2'), row('3', { status: 'completed' }), row('4')]
+  expect(fitting(list, 3).map(one => one.id)).toEqual(['1', '2', '4'])
+})

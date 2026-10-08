@@ -1,0 +1,5 @@
+{
+  "name": "claude-taskbars",
+  "owner": { "name": "mrtsvr-techloop" },
+  "plugins": [{ "name": "task-bars", "source": "./" }]
+}
