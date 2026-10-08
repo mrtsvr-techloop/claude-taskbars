@@ -1,6 +1,6 @@
 {
   "name": "task-bars",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Shows the session's tasks above the prompt as a list with a colored progress bar and a percentage",
   "types": "./types/index.d.ts"
 }

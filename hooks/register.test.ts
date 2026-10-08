@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { TaskRow } from '../types'
-import { cellOf, fitting, interrupted, labelOf, percentOf, toneOf } from './model'
+import { cellOf, changesOf, fitting, interrupted, labelOf, percentOf, toneOf } from './model'
 
 /** 100 columns: two columns of bars, each 46 wide beside its pin. */
 const BAND = {
@@ -237,4 +237,37 @@ test('a bar keeps its width, cuts a long name and drops the label where it is na
 
   const list = [row('1', { status: 'completed' }), row('2'), row('3', { status: 'completed' }), row('4')]
   expect(fitting(list, 3).map(one => one.id)).toEqual(['1', '2', '4'])
+})
+
+test('other mods follow the tasks: each change of status reaches the hooks on taskBars.statusChanged', async ($, on) => {
+  const seen: unknown[] = []
+  on('taskBars.statusChanged', (_, e) => {
+    seen.push(e)
+
+    return { value: undefined }
+  })
+  const declare = (tasks: unknown[]) => $.tool.call({ tool: 'mcp__task-bars__set_tasks', tasks } as never)
+
+  await declare([{ name: 'Build', status: 'pending' }])
+  await declare([{ name: 'Build', status: 'in_progress', progress: 40 }])
+  // Progress alone is no change of status.
+  await declare([{ name: 'Build', status: 'in_progress', progress: 80 }])
+  await declare([{ name: 'Build', status: 'completed' }])
+
+  expect(seen.map(one => { const { from, to, name } = one as { from: unknown; to: unknown; name: unknown }; return [name, from, to] })).toEqual([
+    ['Build', null, 'pending'],
+    ['Build', 'pending', 'in_progress'],
+    ['Build', 'in_progress', 'completed'],
+  ])
+})
+
+test('the changes between two lists are the statuses that moved, with what appeared and what left', () => {
+  const before = [row('a', { status: 'pending' }), row('b', { status: 'in_progress' }), row('c')]
+  const after = [row('a', { status: 'in_progress' }), row('b', { status: 'in_progress', progress: 50 }), row('d')]
+
+  expect(changesOf(before, after)).toEqual([
+    { id: 'a', name: 'task a', from: 'pending', to: 'in_progress' },
+    { id: 'd', name: 'task d', from: null, to: 'pending' },
+    { id: 'c', name: 'task c', from: 'pending', to: null },
+  ])
 })

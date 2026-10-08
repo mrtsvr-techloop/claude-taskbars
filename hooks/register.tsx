@@ -1,5 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { TaskRow } from '../types'
 
 import { hasDemo, withDemo, withoutDemo } from './demo'
 import {
@@ -7,6 +9,7 @@ import {
   agentCalled,
   agentStopped,
   cellOf,
+  changesOf,
   cleared,
   created,
   declared,
@@ -18,6 +21,8 @@ import {
   toneOf,
   updated,
 } from './model'
+import { ROLL_CALL_MS, readSignal, signalOf } from './mod-signals/kit/signals'
+import type { Announce, SignalKind } from './mod-signals/kit/signals'
 
 const COMMAND = 'task-bars'
 const DEMO_COMMAND = 'task-bars-demo'
@@ -75,7 +80,126 @@ const SET_TASKS = {
 const tasks = atom({ plugin: 'task-bars', key: 'tasks' } as const, [])
 const isHidden = atom({ plugin: 'task-bars', key: 'isHidden' } as const, false)
 
+/** The mod's name as the engine gives it: the `to` of the commands it obeys. */
+const MOD = 'task-bars'
+const SELF: Announce = { title: 'Tasks', accepts: ['open', 'close', 'toggle'], emits: ['opened', 'closed', 'status-changed'] }
+
+const signal = atom({ plugin: 'task-bars', key: 'signal' } as const, null)
+const sent = { count: 0, answeredAt: 0 }
+
+/** One signal to whoever listens; a mod above that refuses the write stops nothing here. */
+const emit = async (
+  $: EngineInterface,
+  kind: SignalKind,
+  name: string,
+  data?: Record<string, unknown>,
+  tags?: string[],
+): Promise<void> => {
+  sent.count += 1
+
+  try {
+    await update($, signal, () => signalOf(kind, name, sent.count, Date.now(), { ...(data === undefined ? {} : { data }), ...(tags === undefined ? {} : { tags }) }))
+  } catch {
+    // The mod goes on without the signal.
+  }
+}
+
+/**
+ * Every write of the tasks: each change of status it makes is told to the mods
+ * hooked on `taskBars.statusChanged`, one that fails stopping nothing, and to
+ * whoever listens to signals, as the event `status-changed`.
+ */
+const change = async ($: EngineInterface, apply: (list: TaskRow[]) => TaskRow[]): Promise<void> => {
+  const before = await read($, tasks)
+  await update($, tasks, apply)
+
+  for (const one of changesOf(before, await read($, tasks))) {
+    try {
+      await $.taskBars.statusChanged(one)
+    } catch {
+      // The tasks go on whatever a listener met.
+    }
+
+    // A task that is done is the one change tagged for whoever tells the person.
+    await emit($, 'event', 'status-changed', { ...one, text: `${one.name} is done` }, one.to === 'completed' ? ['info', 'completion'] : undefined)
+  }
+}
+
+/** Shows or hides the bars, and says so where that changed. */
+const setHidden = async ($: EngineInterface, hidden: boolean): Promise<boolean> => {
+  const wasHidden = await read($, isHidden)
+  await update($, isHidden, () => hidden)
+
+  if (wasHidden !== hidden) {
+    await emit($, 'event', hidden ? 'closed' : 'opened')
+  }
+
+  return !hidden
+}
+
+/** A command another mod sent: what the person could do with `/task-bars`, and no more. */
+const obey = async ($: EngineInterface, name: string): Promise<void> => {
+  if (name === 'open') {
+    await $.taskBars.open()
+  } else if (name === 'close') {
+    await $.taskBars.close()
+  } else if (name === 'toggle') {
+    await $.taskBars.toggle()
+  }
+}
+
 export const register: Register = on => {
+  // Mod Signals: every signal, whoever writes it. The write goes on first and
+  // untouched; the mod answers a roll-call and obeys the commands sent to it.
+  on('state.set', { key: 'signal' }, async ($, e, next) => {
+    const done = await next(e)
+    const heard = done.value?.isSet === true ? readSignal(e.value) : null
+
+    if (heard?.kind === 'event' && heard.name === 'roll-call' && Date.now() - sent.answeredAt >= ROLL_CALL_MS) {
+      sent.answeredAt = Date.now()
+      await emit($, 'announce', 'announce', SELF)
+    }
+
+    if (heard?.kind === 'command' && heard.to === MOD) {
+      await obey($, heard.name)
+    }
+
+    return done
+  }).catch((_, e, next) => next(e))
+
+  // The mod's API: `$.taskBars` for any other mod. Each method is answered by its
+  // hook below, but `statusChanged`, which is the other mods' to hook.
+  on('engine.create', async ($, e, next) => ({
+    ...(await next(e)),
+    taskBars: {
+      open: async () => false,
+      close: async () => false,
+      toggle: async () => false,
+      isOpen: async () => false,
+      list: async () => [],
+      getStatus: async () => null,
+      statusChanged: async () => undefined,
+    },
+  }))
+
+  on('taskBars.isOpen', async $ => ({ value: !(await read($, isHidden)) }))
+
+  on('taskBars.open', async $ => ({ value: await setHidden($, false) }))
+
+  on('taskBars.close', async $ => ({ value: await setHidden($, true) }))
+
+  on('taskBars.toggle', async $ => ({ value: await setHidden($, !(await read($, isHidden))) }))
+
+  on('taskBars.list', async $ => ({
+    value: (await read($, tasks)).map(({ id, name, status, progress }) => ({ id, name, status, progress })),
+  }))
+
+  on('taskBars.getStatus', async ($, e) => {
+    const list = await read($, tasks)
+
+    return { value: (list.find(one => one.id === e.task) ?? list.find(one => one.name === e.task))?.status ?? null }
+  })
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
@@ -88,6 +212,7 @@ export const register: Register = on => {
     })
 
     await $.tool.register(SET_TASKS)
+    await emit($, 'announce', 'announce', SELF)
 
     return next(e)
   })
@@ -99,15 +224,15 @@ export const register: Register = on => {
       return { deny: `tasks must be a list of { name, status, progress? }, status one of ${TASK_STATUSES.join(', ')}.` }
     }
 
-    await update($, tasks, list => declared(list, input) ?? list)
+    await change($, list => declared(list, input) ?? list)
 
     return { result: 'The task bars are up to date.' }
   })
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
-    await update($, tasks, list => agentCalled(list, e.tool_use_id, { ...e }))
+    await change($, list => agentCalled(list, e.tool_use_id, { ...e }))
     const ran = await next(e)
-    await update($, tasks, list =>
+    await change($, list =>
       agentAnswered(list, e.tool_use_id, ran.result, ran.deny !== undefined || ran.isError === true),
     )
 
@@ -115,27 +240,25 @@ export const register: Register = on => {
   })
 
   on('classic.SubagentStop', async ($, e, next) => {
-    await update($, tasks, list => agentStopped(list, e.agent_id))
+    await change($, list => agentStopped(list, e.agent_id))
 
     return next(e)
   })
 
   on('command.run', { command: DEMO_COMMAND }, async $ => {
     const isShown = hasDemo(await read($, tasks))
-    await update($, tasks, isShown ? withoutDemo : withDemo)
+    await change($, isShown ? withoutDemo : withDemo)
 
     if (!isShown) {
-      await update($, isHidden, () => false)
+      await $.taskBars.open()
     }
 
     return { text: isShown ? 'Sample tasks removed.' : 'Sample tasks added.' }
   })
 
   on('command.run', { command: COMMAND }, async $ => {
-    const hidden = !(await read($, isHidden))
-    await update($, isHidden, () => hidden)
-
-    return { text: hidden ? 'Task bars hidden.' : 'Task bars shown.' }
+    // The command is one caller of the mod's API among others.
+    return { text: (await $.taskBars.toggle()) ? 'Task bars shown.' : 'Task bars hidden.' }
   })
 
   on('prompt.compose', async ($, e, next) => {
@@ -145,28 +268,28 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    await update($, tasks, cleared)
+    await change($, cleared)
 
     return next(e)
   })
 
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
-    await update($, tasks, list => created(list, ran.result))
+    await change($, list => created(list, ran.result))
 
     return ran
   })
 
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
-    await update($, tasks, list => updated(list, { ...e }, ran.result))
+    await change($, list => updated(list, { ...e }, ran.result))
 
     return ran
   })
 
   on('tool.call', { tool: 'TaskList' }, async ($, e, next) => {
     const ran = await next(e)
-    await update($, tasks, list => listed(list, ran.result))
+    await change($, list => listed(list, ran.result))
 
     return ran
   })
@@ -175,7 +298,7 @@ export const register: Register = on => {
     const ran = await next(e)
 
     if (ran.deny === undefined && ran.isError !== true) {
-      await update($, tasks, list => todos(list, { ...e }))
+      await change($, list => todos(list, { ...e }))
     }
 
     return ran
@@ -183,7 +306,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.reason === 'aborted') {
-      await update($, tasks, interrupted)
+      await change($, interrupted)
     }
 
     return next(e)
@@ -231,7 +354,7 @@ export const register: Register = on => {
                       plain
                       dimColor={row.isPinned !== true}
                       label={row.isPinned === true ? PINNED : LOOSE}
-                      onPress={() => update($, tasks, rows => toggled(rows, row.id))}
+                      onPress={() => change($, rows => toggled(rows, row.id))}
                     />
                   </Box>
                   {cell.filled.length > 0 && (

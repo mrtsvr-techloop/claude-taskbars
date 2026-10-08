@@ -1,4 +1,4 @@
-import type { TaskRow, TaskStatus } from '../types'
+import type { TaskBarsChange, TaskRow, TaskStatus } from '../types'
 
 type Bag = Record<string, unknown>
 
@@ -307,4 +307,18 @@ export const fitting = (list: TaskRow[], room: number): TaskRow[] => {
   )
 
   return list.filter(row => kept.has(row.id))
+}
+
+/** The changes of status between two states of the list, tasks that appeared or left included. */
+export const changesOf = (before: TaskRow[], after: TaskRow[]): TaskBarsChange[] => {
+  const moved = after.flatMap(row => {
+    const from = before.find(one => one.id === row.id)?.status ?? null
+
+    return from === row.status ? [] : [{ id: row.id, name: row.name, from, to: row.status }]
+  })
+  const gone = before
+    .filter(row => !after.some(one => one.id === row.id))
+    .map(row => ({ id: row.id, name: row.name, from: row.status, to: null }))
+
+  return [...moved, ...gone]
 }
